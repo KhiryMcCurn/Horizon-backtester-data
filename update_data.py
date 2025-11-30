@@ -9,6 +9,7 @@ Features:
 - Delays between batches
 - Retry logic for failed downloads
 - Supports ~600 tickers (S&P 500 + Nasdaq 100 + recent IPOs + ETFs)
+- Processes user ticker requests from requests.txt
 """
 
 import yfinance as yf
@@ -16,7 +17,7 @@ import pandas as pd
 import os
 import time
 from datetime import datetime, timedelta
-from huggingface_hub import HfApi, login
+from huggingface_hub import HfApi, login, hf_hub_download
 import sys
 
 # =============================================================================
@@ -100,6 +101,47 @@ BATCH_SIZE = 50  # Download 50 tickers at a time
 BATCH_DELAY = 5  # Wait 5 seconds between batches
 MAX_RETRIES = 2  # Retry failed downloads up to 2 times
 UPLOAD_BATCH_SIZE = 100  # Upload 100 files at a time
+
+
+def fetch_requested_tickers(token):
+    """
+    Fetch requests.txt from HuggingFace and return list of requested tickers.
+    """
+    try:
+        login(token=token)
+        filepath = hf_hub_download(
+            repo_id=REPO_ID,
+            filename="requests.txt",
+            repo_type=REPO_TYPE
+        )
+        with open(filepath, 'r') as f:
+            tickers = [line.strip().upper() for line in f if line.strip()]
+        return list(set(tickers))  # Remove duplicates
+    except Exception as e:
+        # File might not exist yet, that's OK
+        print(f"ℹ️  No requests.txt found or error reading: {e}")
+        return []
+
+
+def clear_requests_file(token):
+    """
+    Clear the requests.txt file on HuggingFace after processing.
+    """
+    try:
+        api = HfApi()
+        # Upload empty file to clear requests
+        api.upload_file(
+            path_or_fileobj=b"",  # Empty content
+            path_in_repo="requests.txt",
+            repo_id=REPO_ID,
+            repo_type=REPO_TYPE,
+            commit_message="🤖 Clear processed ticker requests"
+        )
+        print("✅ Cleared requests.txt")
+        return True
+    except Exception as e:
+        print(f"⚠️  Could not clear requests.txt: {e}")
+        return False
 
 
 def download_ticker_data(ticker, start_date, end_date, retry_count=0):
@@ -266,11 +308,27 @@ def push_to_huggingface(token):
 
 def main():
     """Main execution function"""
+    global TICKERS  # Need to modify the global list
+    
     hf_token = os.environ.get("HF_TOKEN")
     
     if not hf_token:
         print("❌ ERROR: HF_TOKEN environment variable not set!")
         sys.exit(1)
+    
+    # Check for requested tickers
+    print(f"\n📥 Checking for ticker requests...")
+    requested = fetch_requested_tickers(hf_token)
+    
+    if requested:
+        print(f"   Found {len(requested)} requested ticker(s): {', '.join(requested)}")
+        # Add requested tickers to the list (avoid duplicates)
+        new_tickers = [t for t in requested if t not in TICKERS]
+        if new_tickers:
+            print(f"   Adding {len(new_tickers)} new ticker(s) to download list")
+            TICKERS = sorted(list(set(TICKERS + new_tickers)))
+    else:
+        print("   No pending requests")
     
     print(f"\n🎯 Horizon Backtester - Bulk Data Update")
     print(f"   Universe: {len(TICKERS)} tickers")
@@ -281,6 +339,9 @@ def main():
     if success_count > 0:
         push_success = push_to_huggingface(hf_token)
         if push_success:
+            # Clear requests file after successful push
+            if requested:
+                clear_requests_file(hf_token)
             print("🎉 Bulk data update job completed successfully!")
             sys.exit(0)
         else:
