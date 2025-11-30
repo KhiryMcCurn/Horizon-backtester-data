@@ -1,168 +1,301 @@
 """
-Update Market Data Script
-Downloads latest stock data and pushes to HuggingFace Space
+DATA UPDATE SCRIPT FOR HORIZON BACKTESTER
+Automatically updates all ticker CSV files with latest market data from Yahoo Finance
+This script is designed to run as a scheduled job at end of trading day
+
+Features:
+- Batched downloads to avoid rate limiting
+- Delays between batches
+- Retry logic for failed downloads
+- Supports ~600 tickers (S&P 500 + Nasdaq 100 + recent IPOs + ETFs)
 """
 
 import yfinance as yf
 import pandas as pd
 import os
-from datetime import datetime, timedelta
-from huggingface_hub import HfApi
 import time
+from datetime import datetime, timedelta
+from huggingface_hub import HfApi, login
+import sys
 
-# Configuration
-REPO_ID = "JakeFake222/horizon-backtester"
-DATA_DIR = "data"
+# =============================================================================
+# TICKER UNIVERSE
+# S&P 500 + Nasdaq 100 + Recent IPOs (2022-2024) + Notable 2020-2021 IPOs + ETFs
+# =============================================================================
 
-# All tickers to update
 TICKERS = [
-    # Tech stocks
-    'AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'TSLA', 'AMZN', 'NFLX', 
-    'NET', 'PLTR', 'SPOT', 'COIN', 'CRWD', 'FUTU', 'HOOD',
-    # Finance
-    'BLK', 'GS', 'V', 'RY',
-    # Retail/Consumer
-    'COST', 'WMT', 'UBER', 'TTWO',
-    # ETFs and Funds
-    'SPY', 'QQQ', 'VTI', 'VOO', 'VXUS', 'DIA', 'IWM', 'TQQQ', 
-    'BND', 'TLT', 'IEF', 'GLD', 'DBC',
-    # International
-    'SFTBY', 'HWM'
+    # S&P 500 Components
+    'A', 'AAL', 'AAPL', 'ABBV', 'ABNB', 'ABT', 'ACGL', 'ACN', 'ADBE', 'ADI', 'ADM', 'ADP', 'ADSK', 'AEE', 'AEP',
+    'AES', 'AFL', 'AIG', 'AIZ', 'AJG', 'AKAM', 'ALB', 'ALGN', 'ALL', 'ALLE', 'AMAT', 'AMCR', 'AMD', 'AME', 'AMGN',
+    'AMP', 'AMT', 'AMZN', 'ANET', 'ANSS', 'AON', 'AOS', 'APA', 'APD', 'APH', 'APTV', 'ARE', 'ATO', 'AVB', 'AVGO',
+    'AVY', 'AWK', 'AXON', 'AXP', 'AZO', 'BA', 'BAC', 'BALL', 'BAX', 'BBWI', 'BBY', 'BDX', 'BEN', 'BF-B', 'BG',
+    'BIIB', 'BIO', 'BK', 'BKNG', 'BKR', 'BLDR', 'BLK', 'BMY', 'BR', 'BRK-B', 'BRO', 'BSX', 'BWA', 'BX', 'BXP',
+    'C', 'CAG', 'CAH', 'CARR', 'CAT', 'CB', 'CBOE', 'CBRE', 'CCI', 'CCL', 'CDNS', 'CDW', 'CE', 'CEG', 'CF',
+    'CFG', 'CHD', 'CHRW', 'CHTR', 'CI', 'CINF', 'CL', 'CLX', 'CMCSA', 'CME', 'CMG', 'CMI', 'CMS', 'CNC', 'CNP',
+    'COF', 'COO', 'COP', 'COR', 'COST', 'CPAY', 'CPB', 'CPRT', 'CPT', 'CRL', 'CRM', 'CRWD', 'CSCO', 'CSGP', 'CSX',
+    'CTAS', 'CTLT', 'CTRA', 'CTSH', 'CTVA', 'CVS', 'CVX', 'CZR', 'D', 'DAL', 'DAY', 'DD', 'DE', 'DECK', 'DFS',
+    'DG', 'DGX', 'DHI', 'DHR', 'DIS', 'DLR', 'DLTR', 'DOC', 'DOV', 'DOW', 'DPZ', 'DRI', 'DTE', 'DUK', 'DVA',
+    'DVN', 'DXCM', 'EA', 'EBAY', 'ECL', 'ED', 'EFX', 'EG', 'EIX', 'EL', 'ELV', 'EMN', 'EMR', 'ENPH', 'EOG',
+    'EPAM', 'EQIX', 'EQR', 'EQT', 'ERIE', 'ES', 'ESS', 'ETN', 'ETR', 'EVRG', 'EW', 'EXC', 'EXPD', 'EXPE', 'EXR',
+    'F', 'FANG', 'FAST', 'FCX', 'FDS', 'FDX', 'FE', 'FFIV', 'FI', 'FICO', 'FIS', 'FITB', 'FMC', 'FOX', 'FOXA',
+    'FRT', 'FSLR', 'FTNT', 'FTV', 'GD', 'GDDY', 'GE', 'GEHC', 'GEN', 'GEV', 'GILD', 'GIS', 'GL', 'GLW', 'GM',
+    'GNRC', 'GOOG', 'GOOGL', 'GPC', 'GPN', 'GRMN', 'GS', 'GWW', 'HAL', 'HAS', 'HBAN', 'HCA', 'HD', 'HES', 'HIG',
+    'HII', 'HLT', 'HOLX', 'HON', 'HPE', 'HPQ', 'HRL', 'HSIC', 'HST', 'HSY', 'HUBB', 'HUM', 'HWM', 'IBM', 'ICE',
+    'IDXX', 'IEX', 'IFF', 'INCY', 'INTC', 'INTU', 'INVH', 'IP', 'IPG', 'IQV', 'IR', 'IRM', 'ISRG', 'IT', 'ITW',
+    'IVZ', 'J', 'JBHT', 'JBL', 'JCI', 'JKHY', 'JNJ', 'JNPR', 'JPM', 'K', 'KDP', 'KEY', 'KEYS', 'KHC', 'KIM',
+    'KKR', 'KLAC', 'KMB', 'KMI', 'KMX', 'KO', 'KR', 'KVUE', 'L', 'LDOS', 'LEN', 'LH', 'LHX', 'LIN', 'LKQ',
+    'LLY', 'LMT', 'LNT', 'LOW', 'LRCX', 'LULU', 'LUV', 'LVS', 'LW', 'LYB', 'LYV', 'MA', 'MAA', 'MAR', 'MAS',
+    'MCD', 'MCHP', 'MCK', 'MCO', 'MDLZ', 'MDT', 'MET', 'META', 'MGM', 'MHK', 'MKC', 'MKTX', 'MLM', 'MMC', 'MMM',
+    'MNST', 'MO', 'MOH', 'MOS', 'MPC', 'MPWR', 'MRK', 'MRNA', 'MRO', 'MS', 'MSCI', 'MSFT', 'MSI', 'MTB', 'MTCH',
+    'MTD', 'MU', 'NCLH', 'NDAQ', 'NDSN', 'NEE', 'NEM', 'NFLX', 'NI', 'NKE', 'NOC', 'NOW', 'NRG', 'NSC', 'NTAP',
+    'NTRS', 'NUE', 'NVDA', 'NVR', 'NWS', 'NWSA', 'NXPI', 'O', 'ODFL', 'OKE', 'OMC', 'ON', 'ORCL', 'ORLY', 'OTIS',
+    'OXY', 'PANW', 'PARA', 'PAYC', 'PAYX', 'PCAR', 'PCG', 'PEG', 'PEP', 'PFE', 'PFG', 'PG', 'PGR', 'PH', 'PHM',
+    'PKG', 'PLD', 'PLTR', 'PM', 'PNC', 'PNR', 'PNW', 'PODD', 'POOL', 'PPG', 'PPL', 'PRU', 'PSA', 'PSX', 'PTC',
+    'PWR', 'PYPL', 'QCOM', 'QRVO', 'RCL', 'REG', 'REGN', 'RF', 'RJF', 'RL', 'RMD', 'ROK', 'ROL', 'ROP', 'ROST',
+    'RSG', 'RTX', 'RVTY', 'SBAC', 'SBUX', 'SCHW', 'SHW', 'SJM', 'SLB', 'SMCI', 'SNA', 'SNPS', 'SO', 'SOLV', 'SPG',
+    'SPGI', 'SRE', 'STE', 'STLD', 'STT', 'STX', 'STZ', 'SWK', 'SWKS', 'SYF', 'SYK', 'SYY', 'T', 'TAP', 'TDG',
+    'TDY', 'TECH', 'TEL', 'TER', 'TFC', 'TFX', 'TGT', 'TJX', 'TMO', 'TMUS', 'TPR', 'TRGP', 'TRMB', 'TROW', 'TRV',
+    'TSCO', 'TSLA', 'TSN', 'TT', 'TTWO', 'TXN', 'TXT', 'TYL', 'UAL', 'UBER', 'UDR', 'UHS', 'ULTA', 'UNH', 'UNP',
+    'UPS', 'URI', 'USB', 'V', 'VICI', 'VLO', 'VLTO', 'VMC', 'VRSK', 'VRSN', 'VRTX', 'VST', 'VTR', 'VTRS', 'VZ',
+    'WAB', 'WAT', 'WBA', 'WBD', 'WDC', 'WEC', 'WELL', 'WFC', 'WM', 'WMB', 'WMT', 'WRB', 'WST', 'WTW', 'WY',
+    'WYNN', 'XEL', 'XOM', 'XYL', 'YUM', 'ZBH', 'ZBRA', 'ZTS',
+    
+    # Nasdaq 100 additions (not in S&P 500)
+    'AZN', 'APP', 'ARM', 'CCEP', 'DASH', 'DDOG', 'GFS', 'MELI', 'MRVL', 'PDD', 'TEAM', 'WDAY',
+    
+    # ETFs and Benchmarks
+    'SPY', 'QQQ', 'VTI', 'VOO', 'VXUS', 'DIA', 'IWM', 'TQQQ', 'SQQQ', 'BND', 'TLT', 'IEF', 'GLD', 'DBC', 'VNQ',
+    'XLF', 'XLK', 'XLE', 'XLV', 'ARKK', 'ARKW', 'SOXL', 'SOXS', 'UPRO', 'SPXU', 'VEA', 'VWO', 'EFA', 'EEM',
+    'AGG', 'LQD', 'HYG', 'SHY', 'IEMG', 'VIG', 'SCHD', 'VYM', 'DVY', 'JEPI',
+    
+    # Notable 2020-2021 IPOs
+    'RIVN', 'LCID', 'RBLX', 'COIN', 'HOOD', 'SNOW', 'U', 'CPNG', 'COUR', 'OSCR', 'SOFI', 'UPST', 'AFRM', 'PATH',
+    'ZI', 'BROS', 'DUOL', 'ASAN', 'FVRR', 'DOCS', 'DNUT', 'YOU', 'AI', 'DLO', 'JAMF', 'NCNO', 'BIGC', 'JMIA', 
+    'DKNG', 'NKLA', 'BLNK', 'QS', 'GOEV', 'LAZR', 'LMND', 'OPEN',
+    
+    # 2022 IPOs (notable)
+    'TPG', 'CRDO', 'MBLY', 'ACLX', 'BLTE', 'GCT', 'IE', 'CRBG',
+    
+    # 2023 IPOs (notable)
+    'BIRK', 'CART', 'KVYO', 'CAVA', 'ATMU', 'KGS', 'ODD', 'APGE', 'GPCR', 'ENLT', 'NXT',
+    
+    # 2024 IPOs (notable)
+    'RDDT', 'ALAB', 'VIK', 'LOAR', 'RBRK', 'AHR', 'IBTA', 'TEM', 'WAY', 'NNE',
+    
+    # Diamond Horizon specific (ensuring these are included)
+    'FUTU', 'SFTBY', 'RY', 'NET'
 ]
 
+# Remove duplicates and sort
+TICKERS = sorted(list(set(TICKERS)))
 
-def main():
-    print(f"=== Market Data Update Started ===")
-    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Tickers to update: {len(TICKERS)}")
+# Repository configuration
+REPO_ID = "JakeFake222/horizon-backtester"
+REPO_TYPE = "space"
+DATA_DIR = "data"
+
+# Rate limiting configuration
+BATCH_SIZE = 50  # Download 50 tickers at a time
+BATCH_DELAY = 5  # Wait 5 seconds between batches
+MAX_RETRIES = 2  # Retry failed downloads up to 2 times
+
+
+def download_ticker_data(ticker, start_date, end_date, retry_count=0):
+    """
+    Download historical data for a single ticker from Yahoo Finance
+    
+    Args:
+        ticker: Stock ticker symbol
+        start_date: Start date for historical data
+        end_date: End date for historical data
+        retry_count: Current retry attempt number
+    
+    Returns:
+        DataFrame with OHLCV data or None if download fails
+    """
+    try:
+        data = yf.download(
+            ticker, 
+            start=start_date, 
+            end=end_date,
+            auto_adjust=True,
+            progress=False,
+            threads=False
+        )
+        
+        if data.empty:
+            return None
+            
+        return data
+        
+    except Exception as e:
+        if retry_count < MAX_RETRIES:
+            time.sleep(2)  # Wait before retry
+            return download_ticker_data(ticker, start_date, end_date, retry_count + 1)
+        print(f"❌ Error downloading {ticker} after {MAX_RETRIES} retries: {e}")
+        return None
+
+
+def download_batch(tickers_batch, start_date, end_date, batch_num, total_batches):
+    """
+    Download a batch of tickers
+    
+    Args:
+        tickers_batch: List of tickers to download
+        start_date: Start date
+        end_date: End date
+        batch_num: Current batch number
+        total_batches: Total number of batches
+    
+    Returns:
+        Dict of {ticker: DataFrame} for successful downloads
+    """
+    print(f"\n📦 Batch {batch_num}/{total_batches} ({len(tickers_batch)} tickers)")
+    print(f"   Tickers: {', '.join(tickers_batch[:10])}{'...' if len(tickers_batch) > 10 else ''}")
+    
+    results = {}
+    
+    for ticker in tickers_batch:
+        data = download_ticker_data(ticker, start_date, end_date)
+        if data is not None and not data.empty:
+            results[ticker] = data
+            print(f"   ✅ {ticker}: {len(data)} rows")
+        else:
+            print(f"   ⚠️  {ticker}: no data")
+    
+    return results
+
+
+def update_all_tickers():
+    """
+    Update CSV files for all tickers with batching and rate limiting
+    
+    Returns:
+        Tuple of (success_count, error_count)
+    """
+    # Calculate date range (5 years of history)
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=5*365)
+    
+    print(f"\n{'='*70}")
+    print(f"🚀 HORIZON BACKTESTER - BULK DATA UPDATE")
+    print(f"{'='*70}")
+    print(f"📅 Date range: {start_date.date()} to {end_date.date()}")
+    print(f"📊 Total tickers: {len(TICKERS)}")
+    print(f"📦 Batch size: {BATCH_SIZE}")
+    print(f"⏱️  Delay between batches: {BATCH_DELAY}s")
+    print(f"{'='*70}")
     
     # Create data directory
     os.makedirs(DATA_DIR, exist_ok=True)
     
-    # Date range: 5 years
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=5*365)
+    # Split tickers into batches
+    batches = [TICKERS[i:i + BATCH_SIZE] for i in range(0, len(TICKERS), BATCH_SIZE)]
+    total_batches = len(batches)
     
-    success = 0
-    failed = []
+    success_count = 0
+    error_count = 0
     
-    # Download in batches to avoid rate limits
-    batch_size = 5
-    for i in range(0, len(TICKERS), batch_size):
-        batch = TICKERS[i:i+batch_size]
-        batch_num = (i // batch_size) + 1
-        total_batches = (len(TICKERS) + batch_size - 1) // batch_size
+    # Process each batch
+    for batch_num, batch in enumerate(batches, 1):
+        results = download_batch(batch, start_date, end_date, batch_num, total_batches)
         
-        print(f"\nBatch {batch_num}/{total_batches}: {', '.join(batch)}")
+        # Save successful downloads
+        for ticker, data in results.items():
+            filepath = os.path.join(DATA_DIR, f"{ticker}.csv")
+            data.to_csv(filepath)
+            success_count += 1
         
-        try:
-            # Download batch
-            data = yf.download(
-                batch,
-                start=start_date.strftime('%Y-%m-%d'),
-                end=end_date.strftime('%Y-%m-%d'),
-                auto_adjust=True,
-                threads=False,
-                progress=False
-            )
-            
-            if not data.empty:
-                # Save each ticker
-                for ticker in batch:
-                    try:
-                        # Handle single vs multiple tickers
-                        if len(batch) == 1:
-                            ticker_data = pd.DataFrame({
-                                'Open': data['Open'],
-                                'High': data['High'],
-                                'Low': data['Low'],
-                                'Close': data['Close'],
-                                'Volume': data['Volume']
-                            })
-                        else:
-                            if ticker in data['Close'].columns:
-                                ticker_data = pd.DataFrame({
-                                    'Open': data['Open'][ticker],
-                                    'High': data['High'][ticker],
-                                    'Low': data['Low'][ticker],
-                                    'Close': data['Close'][ticker],
-                                    'Volume': data['Volume'][ticker]
-                                })
-                            else:
-                                failed.append(ticker)
-                                continue
-                        
-                        ticker_data = ticker_data.dropna()
-                        if not ticker_data.empty:
-                            filepath = os.path.join(DATA_DIR, f'{ticker}.csv')
-                            ticker_data.to_csv(filepath)
-                            success += 1
-                            print(f"  ✅ {ticker}: {len(ticker_data)} rows")
-                        else:
-                            failed.append(ticker)
-                            print(f"  ⚠️ {ticker}: No data")
-                    except Exception as e:
-                        failed.append(ticker)
-                        print(f"  ❌ {ticker}: {str(e)[:50]}")
-            else:
-                failed.extend(batch)
-                print(f"  ❌ Batch failed: No data returned")
-            
-            # Delay between batches
-            if i + batch_size < len(TICKERS):
-                time.sleep(2)
-                
-        except Exception as e:
-            failed.extend(batch)
-            print(f"  ❌ Batch error: {str(e)[:100]}")
+        error_count += len(batch) - len(results)
+        
+        # Delay between batches (except for last batch)
+        if batch_num < total_batches:
+            print(f"   ⏳ Waiting {BATCH_DELAY}s before next batch...")
+            time.sleep(BATCH_DELAY)
     
-    # Save timestamp
-    timestamp_file = os.path.join(DATA_DIR, 'last_update.txt')
+    # Write timestamp file
+    timestamp_file = os.path.join(DATA_DIR, "last_update.txt")
     with open(timestamp_file, 'w') as f:
-        f.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        f.write(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
+        f.write(f"Total tickers: {len(TICKERS)}\n")
+        f.write(f"Successful: {success_count}\n")
+        f.write(f"Failed: {error_count}\n")
     
-    print(f"\n=== Download Complete ===")
-    print(f"Success: {success}/{len(TICKERS)}")
-    if failed:
-        print(f"Failed: {', '.join(failed)}")
+    print(f"\n{'='*70}")
+    print(f"✅ DATA UPDATE COMPLETE")
+    print(f"{'='*70}")
+    print(f"✅ Successful: {success_count}")
+    print(f"❌ Failed: {error_count}")
+    print(f"📁 Data saved to: {DATA_DIR}/")
+    print(f"{'='*70}\n")
     
-    # Push to HuggingFace Space
-    print(f"\n=== Pushing to HuggingFace Space ===")
+    return success_count, error_count
+
+
+def push_to_huggingface(token):
+    """
+    Push updated CSV files to Hugging Face repository
+    
+    Args:
+        token: Hugging Face API token with write access
+    """
     try:
-        token = os.environ.get('HF_TOKEN')
-        if not token:
-            print("❌ HF_TOKEN not found in environment variables")
-            return
+        print(f"\n{'='*70}")
+        print("🚀 PUSHING TO HUGGING FACE")
+        print(f"{'='*70}\n")
         
-        api = HfApi(token=token)
+        # Login to Hugging Face
+        login(token=token)
+        api = HfApi()
         
-        # Upload all CSV files
-        csv_files = [f for f in os.listdir(DATA_DIR) if f.endswith('.csv')]
-        print(f"Uploading {len(csv_files)} files...")
-        
-        for csv_file in csv_files:
-            filepath = os.path.join(DATA_DIR, csv_file)
-            api.upload_file(
-                path_or_fileobj=filepath,
-                path_in_repo=f'data/{csv_file}',
-                repo_id=REPO_ID,
-                repo_type='space'
-            )
-        
-        # Upload timestamp
-        api.upload_file(
-            path_or_fileobj=timestamp_file,
-            path_in_repo='data/last_update.txt',
+        # Upload the entire data directory
+        print(f"📤 Uploading data directory to {REPO_ID}...")
+        api.upload_folder(
+            folder_path=DATA_DIR,
+            path_in_repo=DATA_DIR,
             repo_id=REPO_ID,
-            repo_type='space'
+            repo_type=REPO_TYPE,
+            commit_message=f"🤖 Bulk data update ({len(TICKERS)} tickers) - {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}"
         )
         
-        print(f"✅ Pushed {len(csv_files)} files to {REPO_ID}")
+        print(f"✅ Successfully pushed to Hugging Face!")
+        print(f"{'='*70}\n")
+        return True
         
     except Exception as e:
-        print(f"❌ Push failed: {str(e)}")
+        print(f"❌ Error pushing to Hugging Face: {e}")
+        return False
+
+
+def main():
+    """Main execution function"""
+    # Get HF token from environment variable
+    hf_token = os.environ.get("HF_TOKEN")
     
-    print(f"\n=== Update Complete ===")
+    if not hf_token:
+        print("❌ ERROR: HF_TOKEN environment variable not set!")
+        print("Please set your Hugging Face write token as HF_TOKEN")
+        sys.exit(1)
+    
+    print(f"\n🎯 Horizon Backtester - Bulk Data Update")
+    print(f"   Universe: {len(TICKERS)} tickers")
+    print(f"   Estimated time: ~{(len(TICKERS) // BATCH_SIZE) * BATCH_DELAY // 60 + 5} minutes\n")
+    
+    # Update all ticker data
+    success_count, error_count = update_all_tickers()
+    
+    # Push to Hugging Face if we had any successful downloads
+    if success_count > 0:
+        push_success = push_to_huggingface(hf_token)
+        if push_success:
+            print("🎉 Bulk data update job completed successfully!")
+            sys.exit(0)
+        else:
+            print("⚠️  Data downloaded but failed to push to Hugging Face")
+            sys.exit(1)
+    else:
+        print("❌ No data was downloaded - skipping push to Hugging Face")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
