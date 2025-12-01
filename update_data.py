@@ -160,8 +160,18 @@ def download_ticker_data(ticker, start_date, end_date, retry_count=0):
         
         if data.empty:
             return None
+        
+        # Flatten MultiIndex columns if present (yfinance returns this format now)
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        
+        # Ensure we have the expected columns
+        expected_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        if not all(col in data.columns for col in expected_cols):
+            print(f"   ⚠️  {ticker}: Missing expected columns, got {data.columns.tolist()}")
+            return None
             
-        return data
+        return data[expected_cols]
         
     except Exception as e:
         if retry_count < MAX_RETRIES:
