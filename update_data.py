@@ -259,8 +259,8 @@ def update_all_tickers():
 
 def push_to_huggingface(token):
     """
-    Push updated CSV files to Hugging Face repository using upload_large_folder
-    (recommended for folders with many files - handles chunking automatically)
+    Push updated CSV files to Hugging Face repository using upload_folder
+    with multi_commits=True for handling many files without timeout
     """
     try:
         print(f"\n{'='*70}")
@@ -273,14 +273,18 @@ def push_to_huggingface(token):
         # Count files
         file_count = len([f for f in os.listdir(DATA_DIR) if os.path.isfile(os.path.join(DATA_DIR, f))])
         print(f"📁 Total files to upload: {file_count}")
-        print(f"📤 Uploading data folder (large folder mode)...")
+        print(f"📤 Uploading data folder (multi-commit mode)...")
         
-        # Use upload_large_folder - handles chunking and retries automatically
-        api.upload_large_folder(
+        # Use upload_folder with multi_commits for large uploads
+        # This splits the upload into multiple commits to avoid timeout
+        api.upload_folder(
             folder_path=DATA_DIR,
+            path_in_repo="data",
             repo_id=REPO_ID,
             repo_type=REPO_TYPE,
-            path_in_repo="data",
+            commit_message=f"🤖 Data update ({file_count} files)",
+            multi_commits=True,
+            multi_commits_verbose=True,
         )
         
         print(f"\n✅ Successfully pushed to Hugging Face!")
