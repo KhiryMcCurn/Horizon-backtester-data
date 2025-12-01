@@ -100,7 +100,6 @@ DATA_DIR = "data"
 BATCH_SIZE = 50  # Download 50 tickers at a time
 BATCH_DELAY = 5  # Wait 5 seconds between batches
 MAX_RETRIES = 2  # Retry failed downloads up to 2 times
-UPLOAD_BATCH_SIZE = 100  # Upload 100 files at a time
 
 
 def fetch_requested_tickers(token):
@@ -260,52 +259,30 @@ def update_all_tickers():
 
 def push_to_huggingface(token):
     """
-    Push updated CSV files to Hugging Face repository in batches
+    Push updated CSV files to Hugging Face repository using upload_folder
+    (single commit instead of 600+ individual commits)
     """
     try:
         print(f"\n{'='*70}")
-        print("🚀 PUSHING TO HUGGING FACE (batched uploads)")
+        print("🚀 PUSHING TO HUGGING FACE")
         print(f"{'='*70}\n")
         
         login(token=token)
         api = HfApi()
         
-        # Get list of all files to upload
-        all_files = []
-        for filename in os.listdir(DATA_DIR):
-            filepath = os.path.join(DATA_DIR, filename)
-            if os.path.isfile(filepath):
-                all_files.append((filepath, f"data/{filename}"))
+        # Count files
+        file_count = len([f for f in os.listdir(DATA_DIR) if os.path.isfile(os.path.join(DATA_DIR, f))])
+        print(f"📁 Total files to upload: {file_count}")
+        print(f"📤 Uploading entire data folder in single commit...")
         
-        print(f"📁 Total files to upload: {len(all_files)}")
-        
-        # Upload in batches
-        total_batches = (len(all_files) + UPLOAD_BATCH_SIZE - 1) // UPLOAD_BATCH_SIZE
-        
-        for batch_num in range(total_batches):
-            start_idx = batch_num * UPLOAD_BATCH_SIZE
-            end_idx = min(start_idx + UPLOAD_BATCH_SIZE, len(all_files))
-            batch = all_files[start_idx:end_idx]
-            
-            print(f"\n📤 Upload batch {batch_num + 1}/{total_batches} ({len(batch)} files)")
-            
-            for filepath, repo_path in batch:
-                try:
-                    api.upload_file(
-                        path_or_fileobj=filepath,
-                        path_in_repo=repo_path,
-                        repo_id=REPO_ID,
-                        repo_type=REPO_TYPE,
-                        commit_message=f"Update {os.path.basename(filepath)}"
-                    )
-                except Exception as e:
-                    print(f"   ⚠️  Failed to upload {filepath}: {e}")
-            
-            print(f"   ✅ Batch {batch_num + 1} complete")
-            
-            # Small delay between upload batches
-            if batch_num < total_batches - 1:
-                time.sleep(2)
+        # Upload entire folder at once (single commit)
+        api.upload_folder(
+            folder_path=DATA_DIR,
+            path_in_repo="data",
+            repo_id=REPO_ID,
+            repo_type=REPO_TYPE,
+            commit_message=f"🤖 Data update ({file_count} files) - {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}"
+        )
         
         print(f"\n✅ Successfully pushed to Hugging Face!")
         print(f"{'='*70}\n")
