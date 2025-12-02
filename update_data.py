@@ -1,15 +1,7 @@
 """
 DATA UPDATE SCRIPT FOR HORIZON BACKTESTER
-Automatically updates all ticker CSV files with latest market data from Yahoo Finance
-This script is designed to run as a scheduled job at end of trading day
-
-Features:
-- Batched downloads to avoid rate limiting
-- Batched uploads to avoid timeout
-- Delays between batches
-- Retry logic for failed downloads
-- Supports ~600 tickers (S&P 500 + Nasdaq 100 + recent IPOs + ETFs)
-- Processes user ticker requests from requests.txt
+Downloads market data from Yahoo Finance and saves to data/ folder.
+Upload to HuggingFace is handled by git push in the workflow.
 """
 
 import yfinance as yf
@@ -17,12 +9,11 @@ import pandas as pd
 import os
 import time
 from datetime import datetime, timedelta
-from huggingface_hub import HfApi, login, hf_hub_download
+from huggingface_hub import hf_hub_download, login
 import sys
 
 # =============================================================================
 # TICKER UNIVERSE
-# S&P 500 + Nasdaq 100 + Recent IPOs (2022-2024) + Notable 2020-2021 IPOs + ETFs
 # =============================================================================
 
 TICKERS = [
@@ -62,7 +53,7 @@ TICKERS = [
     'WAB', 'WAT', 'WBD', 'WDC', 'WEC', 'WELL', 'WFC', 'WM', 'WMB', 'WMT', 'WRB', 'WST', 'WTW', 'WY',
     'WYNN', 'XEL', 'XOM', 'XYL', 'YUM', 'ZBH', 'ZBRA', 'ZTS',
     
-    # Nasdaq 100 additions (not in S&P 500)
+    # Nasdaq 100 additions
     'AZN', 'APP', 'ARM', 'CCEP', 'DASH', 'DDOG', 'GFS', 'MELI', 'PDD', 'TEAM', 'WDAY',
     
     # ETFs and Benchmarks
@@ -70,42 +61,31 @@ TICKERS = [
     'XLF', 'XLK', 'XLE', 'XLV', 'ARKK', 'ARKW', 'SOXL', 'SOXS', 'UPRO', 'SPXU', 'VEA', 'VWO', 'EFA', 'EEM',
     'AGG', 'LQD', 'HYG', 'SHY', 'IEMG', 'VIG', 'SCHD', 'VYM', 'DVY', 'JEPI',
     
-    # Notable 2020-2021 IPOs
+    # Notable IPOs 2020-2024
     'RIVN', 'LCID', 'RBLX', 'COIN', 'HOOD', 'SNOW', 'U', 'CPNG', 'COUR', 'OSCR', 'SOFI', 'UPST', 'AFRM', 'PATH',
     'BROS', 'DUOL', 'ASAN', 'FVRR', 'DOCS', 'DNUT', 'YOU', 'AI', 'DLO', 'JAMF', 'NCNO', 'JMIA', 
     'DKNG', 'NKLA', 'BLNK', 'QS', 'GOEV', 'LAZR', 'LMND', 'OPEN',
-    
-    # 2022 IPOs (notable)
     'TPG', 'CRDO', 'MBLY', 'ACLX', 'BLTE', 'GCT', 'IE', 'CRBG',
-    
-    # 2023 IPOs (notable)
     'BIRK', 'CART', 'KVYO', 'CAVA', 'ATMU', 'KGS', 'ODD', 'APGE', 'GPCR', 'ENLT', 'NXT',
-    
-    # 2024 IPOs (notable)
     'RDDT', 'ALAB', 'VIK', 'LOAR', 'RBRK', 'AHR', 'IBTA', 'TEM', 'WAY', 'NNE',
     
-    # Diamond Horizon specific (ensuring these are included)
+    # Horizon specific
     'FUTU', 'SFTBY', 'RY', 'NET'
 ]
 
-# Remove duplicates and sort
 TICKERS = sorted(list(set(TICKERS)))
 
-# Repository configuration
+# Configuration
 REPO_ID = "JakeFake222/horizon-backtester"
 REPO_TYPE = "space"
 DATA_DIR = "data"
-
-# Rate limiting configuration
-BATCH_SIZE = 50  # Download 50 tickers at a time
-BATCH_DELAY = 5  # Wait 5 seconds between batches
-MAX_RETRIES = 2  # Retry failed downloads up to 2 times
+BATCH_SIZE = 50
+BATCH_DELAY = 5
+MAX_RETRIES = 2
 
 
 def fetch_requested_tickers(token):
-    """
-    Fetch requests.txt from HuggingFace and return list of requested tickers.
-    """
+    """Fetch requests.txt from HuggingFace and return list of requested tickers."""
     try:
         login(token=token)
         filepath = hf_hub_download(
@@ -115,38 +95,14 @@ def fetch_requested_tickers(token):
         )
         with open(filepath, 'r') as f:
             tickers = [line.strip().upper() for line in f if line.strip()]
-        return list(set(tickers))  # Remove duplicates
+        return list(set(tickers))
     except Exception as e:
-        # File might not exist yet, that's OK
-        print(f"ℹ️  No requests.txt found or error reading: {e}")
+        print(f"ℹ️  No requests.txt found: {e}")
         return []
 
 
-def clear_requests_file(token):
-    """
-    Clear the requests.txt file on HuggingFace after processing.
-    """
-    try:
-        api = HfApi()
-        # Upload empty file to clear requests
-        api.upload_file(
-            path_or_fileobj=b"",  # Empty content
-            path_in_repo="requests.txt",
-            repo_id=REPO_ID,
-            repo_type=REPO_TYPE,
-            commit_message="🤖 Clear processed ticker requests"
-        )
-        print("✅ Cleared requests.txt")
-        return True
-    except Exception as e:
-        print(f"⚠️  Could not clear requests.txt: {e}")
-        return False
-
-
 def download_ticker_data(ticker, start_date, end_date, retry_count=0):
-    """
-    Download historical data for a single ticker from Yahoo Finance
-    """
+    """Download historical data for a single ticker from Yahoo Finance."""
     try:
         data = yf.download(
             ticker, 
@@ -160,14 +116,13 @@ def download_ticker_data(ticker, start_date, end_date, retry_count=0):
         if data.empty:
             return None
         
-        # Flatten MultiIndex columns if present (yfinance returns this format now)
+        # Flatten MultiIndex columns if present
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
         
-        # Ensure we have the expected columns
         expected_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         if not all(col in data.columns for col in expected_cols):
-            print(f"   ⚠️  {ticker}: Missing expected columns, got {data.columns.tolist()}")
+            print(f"   ⚠️  {ticker}: Missing expected columns")
             return None
             
         return data[expected_cols]
@@ -176,19 +131,15 @@ def download_ticker_data(ticker, start_date, end_date, retry_count=0):
         if retry_count < MAX_RETRIES:
             time.sleep(2)
             return download_ticker_data(ticker, start_date, end_date, retry_count + 1)
-        print(f"❌ Error downloading {ticker} after {MAX_RETRIES} retries: {e}")
+        print(f"❌ Error downloading {ticker}: {e}")
         return None
 
 
 def download_batch(tickers_batch, start_date, end_date, batch_num, total_batches):
-    """
-    Download a batch of tickers
-    """
+    """Download a batch of tickers."""
     print(f"\n📦 Batch {batch_num}/{total_batches} ({len(tickers_batch)} tickers)")
-    print(f"   Tickers: {', '.join(tickers_batch[:10])}{'...' if len(tickers_batch) > 10 else ''}")
     
     results = {}
-    
     for ticker in tickers_batch:
         data = download_ticker_data(ticker, start_date, end_date)
         if data is not None and not data.empty:
@@ -201,19 +152,15 @@ def download_batch(tickers_batch, start_date, end_date, batch_num, total_batches
 
 
 def update_all_tickers():
-    """
-    Update CSV files for all tickers with batching and rate limiting
-    """
+    """Download and save all ticker data."""
     end_date = datetime.now()
     start_date = end_date - timedelta(days=5*365)
     
     print(f"\n{'='*70}")
-    print(f"🚀 HORIZON BACKTESTER - BULK DATA UPDATE")
+    print(f"🚀 HORIZON BACKTESTER - DATA DOWNLOAD")
     print(f"{'='*70}")
     print(f"📅 Date range: {start_date.date()} to {end_date.date()}")
     print(f"📊 Total tickers: {len(TICKERS)}")
-    print(f"📦 Batch size: {BATCH_SIZE}")
-    print(f"⏱️  Delay between batches: {BATCH_DELAY}s")
     print(f"{'='*70}")
     
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -235,106 +182,42 @@ def update_all_tickers():
         error_count += len(batch) - len(results)
         
         if batch_num < total_batches:
-            print(f"   ⏳ Waiting {BATCH_DELAY}s before next batch...")
+            print(f"   ⏳ Waiting {BATCH_DELAY}s...")
             time.sleep(BATCH_DELAY)
     
-    # Write timestamp file
-    timestamp_file = os.path.join(DATA_DIR, "last_update.txt")
-    with open(timestamp_file, 'w') as f:
+    # Write timestamp
+    with open(os.path.join(DATA_DIR, "last_update.txt"), 'w') as f:
         f.write(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
-        f.write(f"Total tickers: {len(TICKERS)}\n")
         f.write(f"Successful: {success_count}\n")
         f.write(f"Failed: {error_count}\n")
     
     print(f"\n{'='*70}")
-    print(f"✅ DATA UPDATE COMPLETE")
-    print(f"{'='*70}")
-    print(f"✅ Successful: {success_count}")
-    print(f"❌ Failed: {error_count}")
-    print(f"📁 Data saved to: {DATA_DIR}/")
+    print(f"✅ DOWNLOAD COMPLETE: {success_count} successful, {error_count} failed")
     print(f"{'='*70}\n")
     
     return success_count, error_count
 
 
-def push_to_huggingface(token):
-    """
-    Push updated CSV files to Hugging Face repository using upload_folder.
-    """
-    try:
-        print(f"\n{'='*70}")
-        print("🚀 PUSHING TO HUGGING FACE")
-        print(f"{'='*70}\n")
-        
-        login(token=token)
-        api = HfApi()
-        
-        # Count files
-        file_count = len([f for f in os.listdir(DATA_DIR) if os.path.isfile(os.path.join(DATA_DIR, f))])
-        print(f"📁 Total files to upload: {file_count}")
-        print(f"📤 Uploading data folder...")
-        
-        # Use upload_folder - supports path_in_repo for Spaces
-        api.upload_folder(
-            folder_path=DATA_DIR,
-            path_in_repo="data",
-            repo_id=REPO_ID,
-            repo_type=REPO_TYPE,
-            commit_message=f"🤖 Data update ({file_count} files)",
-        )
-        
-        print(f"\n✅ Successfully pushed to Hugging Face!")
-        print(f"{'='*70}\n")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error pushing to Hugging Face: {e}")
-        return False
-
-
 def main():
-    """Main execution function"""
-    global TICKERS  # Need to modify the global list
+    global TICKERS
     
     hf_token = os.environ.get("HF_TOKEN")
     
-    if not hf_token:
-        print("❌ ERROR: HF_TOKEN environment variable not set!")
-        sys.exit(1)
-    
     # Check for requested tickers
-    print(f"\n📥 Checking for ticker requests...")
-    requested = fetch_requested_tickers(hf_token)
-    
-    if requested:
-        print(f"   Found {len(requested)} requested ticker(s): {', '.join(requested)}")
-        # Add requested tickers to the list (avoid duplicates)
-        new_tickers = [t for t in requested if t not in TICKERS]
-        if new_tickers:
-            print(f"   Adding {len(new_tickers)} new ticker(s) to download list")
-            TICKERS = sorted(list(set(TICKERS + new_tickers)))
-    else:
-        print("   No pending requests")
-    
-    print(f"\n🎯 Horizon Backtester - Bulk Data Update")
-    print(f"   Universe: {len(TICKERS)} tickers")
-    print(f"   Estimated time: ~{(len(TICKERS) // BATCH_SIZE) * BATCH_DELAY // 60 + 10} minutes\n")
+    if hf_token:
+        print(f"\n📥 Checking for ticker requests...")
+        requested = fetch_requested_tickers(hf_token)
+        if requested:
+            print(f"   Found {len(requested)} requested ticker(s)")
+            TICKERS = sorted(list(set(TICKERS + requested)))
     
     success_count, error_count = update_all_tickers()
     
     if success_count > 0:
-        push_success = push_to_huggingface(hf_token)
-        if push_success:
-            # Clear requests file after successful push
-            if requested:
-                clear_requests_file(hf_token)
-            print("🎉 Bulk data update job completed successfully!")
-            sys.exit(0)
-        else:
-            print("⚠️  Data downloaded but failed to push to Hugging Face")
-            sys.exit(1)
+        print("🎉 Data download complete! Workflow will commit and push to HuggingFace.")
+        sys.exit(0)
     else:
-        print("❌ No data was downloaded - skipping push to Hugging Face")
+        print("❌ No data downloaded")
         sys.exit(1)
 
 
