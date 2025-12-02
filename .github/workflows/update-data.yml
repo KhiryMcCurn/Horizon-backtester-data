@@ -1,11 +1,8 @@
 name: Update Market Data
 
-# Runs every weekday at 9:30 PM UTC (after US market close)
 on:
   schedule:
     - cron: '30 21 * * 1-5'  # Mon-Fri at 9:30 PM UTC
-  
-  # Allow manual trigger
   workflow_dispatch:
 
 jobs:
@@ -16,6 +13,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
       
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -26,12 +26,25 @@ jobs:
         run: |
           pip install yfinance pandas huggingface_hub
       
-      - name: Update market data
+      - name: Download market data
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_HUB_DOWNLOAD_TIMEOUT: 300
         run: |
           python update_data.py
+      
+      - name: Commit data to GitHub
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add data/
+          git diff --staged --quiet || git commit -m "🤖 Update market data $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push origin main
+      
+      - name: Sync to HuggingFace Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git push https://JakeFake222:$HF_TOKEN@huggingface.co/spaces/JakeFake222/horizon-backtester main --force
       
       - name: Summary
         run: |
