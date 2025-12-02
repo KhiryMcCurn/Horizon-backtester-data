@@ -1,0 +1,7 @@
+gradio==4.44.0
+huggingface_hub==0.24.0
+yfinance==0.2.48
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.0.0
+httpx>=0.24.0
