@@ -16,7 +16,6 @@ import yfinance as yf
 import pandas as pd
 import os
 import time
-import shutil
 from datetime import datetime, timedelta
 from huggingface_hub import HfApi, login, hf_hub_download
 import sys
@@ -260,9 +259,7 @@ def update_all_tickers():
 
 def push_to_huggingface(token):
     """
-    Push updated CSV files to Hugging Face repository using upload_large_folder.
-    Since upload_large_folder doesn't support path_in_repo, we restructure locally
-    to create the data/ subfolder structure before uploading.
+    Push updated CSV files to Hugging Face repository using upload_folder.
     """
     try:
         print(f"\n{'='*70}")
@@ -275,32 +272,16 @@ def push_to_huggingface(token):
         # Count files
         file_count = len([f for f in os.listdir(DATA_DIR) if os.path.isfile(os.path.join(DATA_DIR, f))])
         print(f"📁 Total files to upload: {file_count}")
+        print(f"📤 Uploading data folder...")
         
-        # Create temp structure: temp_upload/data/...
-        # This way upload_large_folder will create /data/ in the repo
-        temp_dir = "temp_upload"
-        temp_data_dir = os.path.join(temp_dir, "data")
-        
-        # Clean up any previous temp directory
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        
-        # Copy data to temp structure
-        print(f"📦 Preparing upload structure...")
-        shutil.copytree(DATA_DIR, temp_data_dir)
-        
-        print(f"📤 Uploading (large folder mode, resumable)...")
-        
-        # Use upload_large_folder - handles chunking and retries automatically
-        # Files will end up in /data/ because of our local structure
-        api.upload_large_folder(
-            folder_path=temp_dir,
+        # Use upload_folder - supports path_in_repo for Spaces
+        api.upload_folder(
+            folder_path=DATA_DIR,
+            path_in_repo="data",
             repo_id=REPO_ID,
             repo_type=REPO_TYPE,
+            commit_message=f"🤖 Data update ({file_count} files)",
         )
-        
-        # Clean up temp directory
-        shutil.rmtree(temp_dir)
         
         print(f"\n✅ Successfully pushed to Hugging Face!")
         print(f"{'='*70}\n")
@@ -308,9 +289,6 @@ def push_to_huggingface(token):
         
     except Exception as e:
         print(f"❌ Error pushing to Hugging Face: {e}")
-        # Clean up temp directory on error too
-        if os.path.exists("temp_upload"):
-            shutil.rmtree("temp_upload")
         return False
 
 
