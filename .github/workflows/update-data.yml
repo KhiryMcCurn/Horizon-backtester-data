@@ -11,7 +11,7 @@ on:
 jobs:
   update-data:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     
     steps:
       - name: Checkout
@@ -29,6 +29,7 @@ jobs:
       - name: Update market data
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_DOWNLOAD_TIMEOUT: 300
         run: |
           python update_data.py
       
