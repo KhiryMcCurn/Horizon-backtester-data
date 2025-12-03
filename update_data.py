@@ -70,7 +70,7 @@ TICKERS = [
     'RDDT', 'ALAB', 'VIK', 'LOAR', 'RBRK', 'AHR', 'IBTA', 'TEM', 'WAY', 'NNE',
     
     # Horizon specific
-    'FUTU', 'SFTBY', 'RY', 'NET'
+    'FUTU', 'SFTBY', 'RY', 'NET', 'SPOT'
 ]
 
 TICKERS = sorted(list(set(TICKERS)))
